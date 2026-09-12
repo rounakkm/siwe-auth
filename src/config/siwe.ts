@@ -1,8 +1,3 @@
-/**
- * Central SIWE configuration read strictly from server environment.
- * Configuration is validated at runtime and never derived from client-controlled values.
- */
-
 export interface SiweConfig {
   domain: string;
   origin: string;

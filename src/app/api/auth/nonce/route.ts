@@ -1,12 +1,7 @@
 import { NextResponse } from "next/server";
 import { nonceStore } from "@/lib/nonce";
 
-/**
- * GET /api/auth/nonce
- *
- * Generates and stores a cryptographically secure nonce on the server,
- * returning it to the client for inclusion in the SIWE signing workflow.
- */
+
 export async function GET() {
   try {
     const nonce = nonceStore.generateAndStore();

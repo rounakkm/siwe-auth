@@ -11,6 +11,7 @@ export interface INonceStore {
   generateAndStore(ttlMs?: number): string;
   has(nonce: string): boolean;
   isValid(nonce: string): boolean;
+  consume(nonce: string): boolean;
   get(nonce: string): NonceEntry | undefined;
   cleanExpired(): void;
   clear(): void;
@@ -19,9 +20,7 @@ export interface INonceStore {
 export class InMemoryNonceStore implements INonceStore {
   private store: Map<string, NonceEntry> = new Map();
 
-  /**
-   * Generates a cryptographically secure nonce using SIWE's generator and stores it with an expiration timestamp.
-   */
+
   generateAndStore(ttlMs?: number): string {
     this.cleanExpired();
 
@@ -39,17 +38,11 @@ export class InMemoryNonceStore implements INonceStore {
     return nonce;
   }
 
-  /**
-   * Checks if the nonce exists in the store (regardless of expiration).
-   */
   has(nonce: string): boolean {
     return this.store.has(nonce);
   }
 
-  /**
-   * Checks if the nonce exists and has not expired.
-   * NOTE: Does NOT consume or delete the nonce (consumption happens after signature verification in Phase 3).
-   */
+
   isValid(nonce: string): boolean {
     const entry = this.store.get(nonce);
     if (!entry) {
@@ -64,16 +57,22 @@ export class InMemoryNonceStore implements INonceStore {
     return true;
   }
 
-  /**
-   * Retrieves the raw entry for a nonce if it exists.
-   */
+
+  consume(nonce: string): boolean {
+    if (!this.isValid(nonce)) {
+      return false;
+    }
+
+    this.store.delete(nonce);
+    return true;
+  }
+
+
   get(nonce: string): NonceEntry | undefined {
     return this.store.get(nonce);
   }
 
-  /**
-   * Removes expired nonces from memory.
-   */
+
   cleanExpired(): void {
     const now = Date.now();
     for (const [nonce, entry] of this.store.entries()) {
@@ -83,15 +82,13 @@ export class InMemoryNonceStore implements INonceStore {
     }
   }
 
-  /**
-   * Clears all nonces (useful for testing).
-   */
+
   clear(): void {
     this.store.clear();
   }
 }
 
-// Preserve singleton across hot reloads in development
+
 const globalForNonce = globalThis as unknown as {
   siweNonceStore?: InMemoryNonceStore;
 };

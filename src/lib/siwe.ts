@@ -16,12 +16,7 @@ export interface CreateSiweMessageParams {
   resources?: string[];
 }
 
-/**
- * Constructs an EIP-4361 compliant SIWE message using server-configured domain,
- * chainId, and server-generated/verified nonce.
- *
- * NOTE: Signature verification is NOT performed in this phase.
- */
+
 export function createSiweMessage(params: CreateSiweMessageParams): SiweMessage {
   if (!params.address || !isAddress(params.address)) {
     throw new Error(`Invalid Ethereum address provided: ${params.address}`);
@@ -30,7 +25,7 @@ export function createSiweMessage(params: CreateSiweMessageParams): SiweMessage 
   const checksummedAddress = getAddress(params.address);
   const config = getSiweConfig();
 
-  // Use provided nonce (and ensure it was issued by server) or issue a new valid nonce
+  
   let effectiveNonce = params.nonce;
   if (!effectiveNonce) {
     effectiveNonce = nonceStore.generateAndStore();
