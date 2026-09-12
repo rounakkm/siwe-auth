@@ -118,7 +118,23 @@ export async function verifySiweAuth(
     };
   }
 
- 
+  if (siwe.uri) {
+    try {
+      const parsedUri = new URL(siwe.uri);
+      if (parsedUri.host !== config.domain) {
+        return {
+          success: false,
+          error: `SIWE URI authority mismatch: expected host '${config.domain}', received '${parsedUri.host}'`,
+        };
+      }
+    } catch {
+      return {
+        success: false,
+        error: `Malformed SIWE URI: ${siwe.uri}`,
+      };
+    }
+  }
+
   if (siwe.chainId !== config.chainId) {
     return {
       success: false,
@@ -126,30 +142,38 @@ export async function verifySiweAuth(
     };
   }
 
-  
   const currentTime = options?.now ? options.now.getTime() : Date.now();
+
+  if (siwe.issuedAt) {
+    const issuedAtTime = new Date(siwe.issuedAt).getTime();
+    if (isNaN(issuedAtTime)) {
+      return {
+        success: false,
+        error: "Invalid issuedAt format in SIWE message",
+      };
+    }
+  }
 
   if (siwe.expirationTime) {
     const expirationTime = new Date(siwe.expirationTime).getTime();
-    if (currentTime >= expirationTime) {
+    if (isNaN(expirationTime) || currentTime >= expirationTime) {
       return {
         success: false,
-        error: "SIWE message has expired",
+        error: isNaN(expirationTime) ? "Invalid expirationTime format in SIWE message" : "SIWE message has expired",
       };
     }
   }
 
   if (siwe.notBefore) {
     const notBeforeTime = new Date(siwe.notBefore).getTime();
-    if (currentTime < notBeforeTime) {
+    if (isNaN(notBeforeTime) || currentTime < notBeforeTime) {
       return {
         success: false,
-        error: "SIWE message is not yet valid (notBefore check failed)",
+        error: isNaN(notBeforeTime) ? "Invalid notBefore format in SIWE message" : "SIWE message is not yet valid (notBefore check failed)",
       };
     }
   }
 
-  
   const store = options?.nonceStore ?? nonceStore;
   if (!store.isValid(siwe.nonce)) {
     return {

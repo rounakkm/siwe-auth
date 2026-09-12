@@ -137,7 +137,6 @@ describe("Phase 3: SIWE Signature Verification", () => {
     const config = getSiweConfig();
     const now = Date.now();
 
-    // Expired message
     const nonce1 = nonceStore.generateAndStore();
     const expiredSiwe = new SiweMessage({
       domain: config.domain,
@@ -156,7 +155,7 @@ describe("Phase 3: SIWE Signature Verification", () => {
     assert.equal(expResult.success, false);
     assert.match(expResult.error || "", /expired/i);
 
-    // Not-yet-valid message (notBefore in future)
+    
     const nonce2 = nonceStore.generateAndStore();
     const futureSiwe = new SiweMessage({
       domain: config.domain,
@@ -221,7 +220,7 @@ describe("Phase 3: SIWE Signature Verification", () => {
     const preparedMessage = siwe.prepareMessage();
     const signature = await account1.signMessage({ message: preparedMessage });
 
-    // Wait for nonce to expire
+    
     await new Promise((resolve) => setTimeout(resolve, 60));
 
     const result = await verifySiweAuth({
@@ -251,17 +250,17 @@ describe("Phase 3: SIWE Signature Verification", () => {
     const preparedMessage = siwe.prepareMessage();
     const wrongSignature = await account2.signMessage({ message: preparedMessage });
 
-    // 1st attempt fails with wrong signature
+    
     const failedResult = await verifySiweAuth({
       message: preparedMessage,
       signature: wrongSignature,
     });
     assert.equal(failedResult.success, false);
 
-    // Verify the nonce is STILL valid and was NOT consumed
+  
     assert.equal(nonceStore.isValid(nonce), true);
 
-    // 2nd attempt with correct signature now succeeds using the same unconsumed nonce
+    
     const correctSignature = await account1.signMessage({ message: preparedMessage });
     const successResult = await verifySiweAuth({
       message: preparedMessage,
@@ -296,7 +295,7 @@ describe("Phase 3: SIWE Signature Verification", () => {
     });
 
     assert.equal(result.success, true);
-    // Nonce must now be consumed and removed from store
+   
     assert.equal(nonceStore.isValid(nonce), false);
     assert.equal(nonceStore.has(nonce), false);
   });
@@ -326,7 +325,7 @@ describe("Phase 3: SIWE Signature Verification", () => {
     });
     assert.equal(firstResult.success, true);
 
-    // Second replay attempt with identical message and signature fails
+    
     const replayResult = await verifySiweAuth({
       message: preparedMessage,
       signature,
@@ -353,7 +352,7 @@ describe("Phase 3: SIWE Signature Verification", () => {
     const preparedMessage = siwe.prepareMessage();
     const signature = await account1.signMessage({ message: preparedMessage });
 
-    // Client maliciously passes a different address in the request payload
+    
     const attackerAddress = "0x000000000000000000000000000000000000dEaD";
     const request = new NextRequest("http://localhost:3000/api/auth/verify", {
       method: "POST",
@@ -371,7 +370,6 @@ describe("Phase 3: SIWE Signature Verification", () => {
 
     const data = await response.json();
     assert.equal(data.ok, true);
-    // Returned address must match the cryptographically verified account1, NOT the attacker-supplied address
     assert.equal(data.address, account1.address);
     assert.notEqual(data.address, attackerAddress);
   });
@@ -380,7 +378,7 @@ describe("Phase 3: SIWE Signature Verification", () => {
     const config = getSiweConfig();
     const nonce = nonceStore.generateAndStore();
 
-    // Mock contract account address
+    
     const contractAddress = "0x1111111111111111111111111111111111111111" as `0x${string}`;
     const validContractSignature = "0x1234567890abcdef" as `0x${string}`;
     const invalidContractSignature = "0xdeadbeef" as `0x${string}`;
@@ -399,7 +397,7 @@ describe("Phase 3: SIWE Signature Verification", () => {
     const preparedMessage = siwe.prepareMessage();
     const expectedHash = hashMessage(preparedMessage);
 
-    // Mock public client that simulates ERC-1271 isValidSignature on-chain call
+   
     const mockPublicClient = {
       async readContract({
         address,
@@ -420,11 +418,11 @@ describe("Phase 3: SIWE Signature Verification", () => {
         ) {
           return ERC1271_MAGIC_VALUE; // 0x1626ba7e
         }
-        return "0xffffffff"; // Invalid magic value
+        return "0xffffffff"; 
       },
     };
 
-    // Test 12a: Valid ERC-1271 signature succeeds
+  
     const validResult = await verifySiweAuth(
       {
         message: preparedMessage,
@@ -436,7 +434,7 @@ describe("Phase 3: SIWE Signature Verification", () => {
     assert.equal(validResult.success, true);
     assert.equal(validResult.address, getAddress(contractAddress));
 
-    // Test 12b: Invalid ERC-1271 signature fails without consuming nonce
+   
     const nonceForInvalid = nonceStore.generateAndStore();
     const siweInvalid = new SiweMessage({
       domain: config.domain,
@@ -460,5 +458,114 @@ describe("Phase 3: SIWE Signature Verification", () => {
     assert.equal(invalidResult.success, false);
     assert.match(invalidResult.error || "", /Invalid cryptographic signature/);
     assert.equal(nonceStore.isValid(nonceForInvalid), true);
+  });
+
+  test("13. SIWE message with mismatched URI authority fails safely", async () => {
+    const config = getSiweConfig();
+    const nonce = nonceStore.generateAndStore();
+
+    const siwe = new SiweMessage({
+      domain: config.domain,
+      address: account1.address,
+      statement: config.statement,
+      uri: "https://attacker-phishing.com/callback",
+      version: "1",
+      chainId: config.chainId,
+      nonce,
+      issuedAt: new Date().toISOString(),
+    });
+
+    const preparedMessage = siwe.prepareMessage();
+    const signature = await account1.signMessage({ message: preparedMessage });
+
+    const result = await verifySiweAuth({
+      message: preparedMessage,
+      signature,
+    });
+
+    assert.equal(result.success, false);
+    assert.match(result.error || "", /SIWE URI authority mismatch/);
+    assert.equal(nonceStore.isValid(nonce), true);
+  });
+
+  test("14. Concurrent verification attempts with the same nonce only succeed once", async () => {
+    const config = getSiweConfig();
+    const nonce = nonceStore.generateAndStore();
+
+    const siwe = new SiweMessage({
+      domain: config.domain,
+      address: account1.address,
+      statement: config.statement,
+      uri: config.origin,
+      version: "1",
+      chainId: config.chainId,
+      nonce,
+      issuedAt: new Date().toISOString(),
+    });
+
+    const preparedMessage = siwe.prepareMessage();
+    const signature = await account1.signMessage({ message: preparedMessage });
+
+    const results = await Promise.all([
+      verifySiweAuth({ message: preparedMessage, signature }),
+      verifySiweAuth({ message: preparedMessage, signature }),
+      verifySiweAuth({ message: preparedMessage, signature }),
+      verifySiweAuth({ message: preparedMessage, signature }),
+      verifySiweAuth({ message: preparedMessage, signature }),
+    ]);
+
+    const successes = results.filter((r) => r.success);
+    const failures = results.filter((r) => !r.success);
+
+    assert.equal(successes.length, 1, "Exactly one concurrent verification must succeed");
+    assert.equal(failures.length, 4, "All other concurrent verifications must fail");
+    assert.equal(nonceStore.isValid(nonce), false, "Nonce must be consumed");
+  });
+
+  test("15. ERC-1271 contract call error or revert fails safely", async () => {
+    const config = getSiweConfig();
+    const nonce = nonceStore.generateAndStore();
+    const contractAddress = "0x2222222222222222222222222222222222222222" as `0x${string}`;
+
+    const siwe = new SiweMessage({
+      domain: config.domain,
+      address: contractAddress,
+      statement: config.statement,
+      uri: config.origin,
+      version: "1",
+      chainId: config.chainId,
+      nonce,
+      issuedAt: new Date().toISOString(),
+    });
+
+    const preparedMessage = siwe.prepareMessage();
+
+    const revertingPublicClient = {
+      async readContract() {
+        throw new Error("Execution reverted: contract execution failed");
+      },
+    };
+
+    const result = await verifySiweAuth(
+      {
+        message: preparedMessage,
+        signature: "0x123456" as Hex,
+      },
+      { publicClient: revertingPublicClient }
+    );
+
+    assert.equal(result.success, false);
+    assert.match(result.error || "", /Invalid cryptographic signature/);
+    assert.equal(nonceStore.isValid(nonce), true);
+  });
+
+  test("16. Malformed SIWE message fails safely", async () => {
+    const result = await verifySiweAuth({
+      message: "not-a-valid-siwe-message-structure",
+      signature: "0x123456",
+    });
+
+    assert.equal(result.success, false);
+    assert.match(result.error || "", /Malformed SIWE message/);
   });
 });

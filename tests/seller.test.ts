@@ -247,4 +247,25 @@ describe("Phase 5: Seller Authorization", () => {
     assert.equal(bobData.address, bob.address);
     assert.notEqual(bobData.address, alice.address);
   });
+
+  test("5. Authenticated non-seller session is safely rejected without data leaks", async () => {
+    const NON_SELLER_KEY = "0x7c852118294e51e653712a81e05800f419141751be58f605c371e15141b007a6";
+    const nonSeller = privateKeyToAccount(NON_SELLER_KEY);
+
+    const nonSellerCookies = await signInAs(nonSeller);
+
+    const listingsReq = new NextRequest("http://localhost:3000/api/seller/listings");
+    const listingsRes = await listingsRoute(listingsReq, { cookieStore: nonSellerCookies });
+    assert.equal(listingsRes.status, 404);
+    const listingsData = await listingsRes.json();
+    assert.equal(listingsData.ok, false);
+    assert.match(listingsData.error, /No seller account found/);
+
+    const payoutReq = new NextRequest("http://localhost:3000/api/seller/payout");
+    const payoutRes = await payoutRoute(payoutReq, { cookieStore: nonSellerCookies });
+    assert.equal(payoutRes.status, 404);
+    const payoutData = await payoutRes.json();
+    assert.equal(payoutData.ok, false);
+    assert.match(payoutData.error, /No seller account found/);
+  });
 });

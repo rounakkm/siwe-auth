@@ -1,1 +1,0 @@
-# siwe-auth
