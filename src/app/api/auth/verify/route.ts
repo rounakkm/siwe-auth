@@ -1,8 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verifySiweAuth } from "@/lib/verify";
+import { getSession } from "@/lib/session";
 
 
-export async function POST(req: NextRequest) {
+export async function POST(
+  req: NextRequest,
+  context?: { params?: Promise<Record<string, string>>; cookieStore?: any }
+) {
   try {
     let body: any;
     try {
@@ -37,6 +41,12 @@ export async function POST(req: NextRequest) {
         { status: 422 }
       );
     }
+
+   
+    const session = await getSession(context?.cookieStore);
+    session.address = result.address;
+    session.authenticated = true;
+    await session.save();
 
     return NextResponse.json(
       {
