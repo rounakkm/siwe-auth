@@ -1,8 +1,6 @@
-# SIWE Session Authentication Prototype
+# SIWE Session Authentication 
 
 A secure, production-pattern prototype implementing **Sign-In with Ethereum (SIWE / EIP-4361)** session authentication and role/seller authorization for Next.js App Router applications.
-
-> **Road To Devcon - IV**: "Log In With a Wallet, Trust Only the Signature"
 
 ---
 
