@@ -1,150 +1,484 @@
-# SIWE Session Authentication 
+# SIWE Session Authentication
 
-A secure, production-pattern prototype implementing **Sign-In with Ethereum (SIWE / EIP-4361)** session authentication and role/seller authorization for Next.js App Router applications.
+A secure, server-verified implementation of **Sign-In with Ethereum (SIWE / EIP-4361)** session authentication with seller authorization for Next.js App Router applications.
+
+The system is designed around a simple security principle: **wallet state and client-supplied addresses are never treated as proof of identity**. Authentication is established only after the server validates the SIWE message, verifies its signature, and creates a server-controlled session.
 
 ---
 
-## 1. Project Purpose & Architecture
+## 1. Architecture
 
-This prototype demonstrates how to authenticate users via Ethereum wallets using SIWE without trusting client-supplied addresses or wallet state. 
+The authentication flow consists of four primary stages:
+
+1. The server generates a cryptographically secure nonce with a finite lifetime.
+2. The client constructs an EIP-4361 SIWE message containing the server-issued nonce and requests a wallet signature.
+3. The server validates the SIWE message and cryptographically verifies the signature for either an externally owned account (EOA) or an ERC-1271 smart contract account.
+4. A verified Ethereum address is stored in an encrypted, HTTP-only session cookie and becomes the sole source of identity for protected routes.
 
 ### Core Security Model
 
-1. **Never trust client-reported addresses or client wallet connection state.**
-2. **Server generates and stores nonces** with a finite Time-To-Live (TTL).
-3. **Server cryptographically verifies SIWE signatures** (recovering the address for EOAs, or calling ERC-1271 `isValidSignature` for smart contract accounts).
-4. **Server establishes an encrypted, HTTP-only cookie session** (`iron-session`) holding the verified address.
-5. **Protected routes (e.g. seller listings and payout) authorize strictly from the server-side session address**, ignoring any client query parameters, headers, or request bodies.
+* **Never trust client-reported wallet addresses or connection state.**
+* **Generate authentication nonces exclusively on the server.**
+* **Enforce nonce expiration and single-use consumption.**
+* **Validate SIWE domain, URI, chain ID, and validity timestamps server-side.**
+* **Verify signatures cryptographically rather than trusting the supplied address.**
+* **Support both EOAs and ERC-1271 smart contract accounts.**
+* **Derive authorization exclusively from the verified server-side session.**
+* **Prevent request parameters, headers, or bodies from overriding the authenticated identity.**
+* **Use encrypted, HTTP-only cookies for session state.**
 
 ```mermaid
 sequenceDiagram
     autonumber
     actor User as Wallet / Client
     participant Server as Next.js API
-    participant Store as Server Nonce Store
+    participant Store as Nonce Store
     participant Chain as Ethereum RPC / Node
 
     User->>Server: GET /api/auth/nonce
     Server->>Store: generateAndStore()
-    Store-->>Server: nonce (e.g. 17-char alphanumeric)
+    Store-->>Server: nonce
     Server-->>User: { nonce }
 
-    Note over User: Constructs EIP-4361 SIWE message<br/>Signs with wallet (personal_sign)
+    Note over User: Constructs EIP-4361 SIWE message<br/>Signs with wallet
 
     User->>Server: POST /api/auth/verify { message, signature }
-    Server->>Server: Validate domain, chain ID, URI authority, & validity window
+
+    Server->>Server: Validate domain, chain ID, URI & validity window
     Server->>Store: isValid(nonce)
-    Store-->>Server: valid (true/false)
+    Store-->>Server: valid
 
     alt EOA Account
-        Server->>Server: recoverAddress(hashMessage(msg), signature)
+        Server->>Server: Recover address from signature
     else Smart Contract Account
-        Server->>Chain: ERC-1271 isValidSignature(hash, signature)
-        Chain-->>Server: magicValue (0x1626ba7e)
+        Server->>Chain: ERC-1271 isValidSignature()
+        Chain-->>Server: magic value
     end
 
-    Server->>Store: consume(nonce) [invalidated on success]
-    Server->>Server: Create encrypted session { address, authenticated: true }
-    Server-->>User: 200 OK + Set-Cookie: siwe_session (HttpOnly, SameSite=Lax)
+    Server->>Store: consume(nonce)
+    Server->>Server: Create encrypted session
+    Server-->>User: 200 OK + Set-Cookie
 
-    User->>Server: GET /api/seller/listings (with session cookie)
+    User->>Server: GET /api/seller/listings
     Server->>Server: Extract session.address
-    Server->>Server: Lookup seller data for session.address
-    Server-->>User: 200 OK { listings: [...] }
+    Server->>Server: Authorize seller by session address
+    Server-->>User: 200 OK { listings }
 ```
 
 ---
 
-## 2. Key Components
+## 2. Authentication Flow
 
-### A. Server-Side Nonce Management ([`src/lib/nonce.ts`](file:///home/blxnk/agy-workspace/siwe-auth/src/lib/nonce.ts))
-- Nonces are generated server-side using cryptographically secure random alphanumeric strings (`siwe.generateNonce`).
-- Stored in an in-memory store with configurable TTL (default: 300 seconds / 5 minutes).
-- **Atomic consumption**: Failed verifications do NOT consume the nonce (allowing user to correct signatures or retry). Successful verifications consume the nonce immediately, preventing replay attacks and concurrent reuse.
+### 2.1 Server-Generated Nonce
 
-### B. SIWE Verification & ERC-1271 Support ([`src/lib/verify.ts`](file:///home/blxnk/agy-workspace/siwe-auth/src/lib/verify.ts))
-- **Domain & Chain ID**: Strictly compared against server-configured environment variables (`SIWE_DOMAIN`, `SIWE_CHAIN_ID`), independent of client headers.
-- **URI Authority**: URI is validated to match the server's expected host/origin to prevent cross-origin phishing.
-- **Validity Windows**: Checks `issuedAt`, `expirationTime`, and `notBefore` against server time.
-- **EOA Signature Verification**: Uses `viem.recoverAddress` with `hashMessage(preparedMessage)` to recover and compare the checksummed address.
-- **ERC-1271 Smart Contract Accounts**: If EOA recovery does not match (or for smart contract wallets like Safe), queries the contract's `isValidSignature(bytes32,bytes)` method on-chain, requiring the standard `0x1626ba7e` magic value.
+The client first requests a nonce from:
 
-### C. Server-Side Session Authentication ([`src/lib/session.ts`](file:///home/blxnk/agy-workspace/siwe-auth/src/lib/session.ts))
-- Built with `iron-session` using AES-256-GCM encrypted cookies.
-- Cookie attributes: `httpOnly: true`, `sameSite: "lax"`, `secure: process.env.NODE_ENV === "production"`, `maxAge: 24 hours`.
-- Session address is set **strictly** from the verified cryptographic return value, ignoring any client-provided address parameters.
+```text
+GET /api/auth/nonce
+```
 
-### D. Protected Seller Routes ([`src/app/api/seller/*`](file:///home/blxnk/agy-workspace/siwe-auth/src/app/api/seller/listings/route.ts))
-- [`requireAuth()`](file:///home/blxnk/agy-workspace/siwe-auth/src/lib/auth-guard.ts) enforces active session authentication.
-- Endpoints (`/api/seller/listings`, `/api/seller/payout`) look up seller data purely from `session.address`.
-- Client query parameters (e.g. `?address=0x...`), headers (e.g. `X-Seller-Address`), or bodies cannot override or inject session identity.
-- Unauthenticated requests receive `401 Unauthorized`.
-- Non-seller addresses receive `404 Not Found` without data leakage.
+The server generates the nonce and stores it with a configurable TTL.
+
+Nonces are:
+
+* Generated server-side using `siwe.generateNonce`
+* Cryptographically unpredictable
+* Valid only for a limited period
+* Associated with a single authentication attempt
+* Consumed after successful verification
+
+A failed signature verification does **not** consume the nonce, allowing the same authentication attempt to be retried. Once verification succeeds, the nonce is consumed immediately to prevent replay and concurrent reuse.
 
 ---
 
-## 3. Environment Variables
+### 2.2 SIWE Message Validation
 
-Create a `.env.local` file based on `.env.example`:
+The client constructs an EIP-4361 message containing the server-issued nonce and requests a signature from the connected wallet.
+
+Before accepting the signature, the server validates:
+
+* SIWE domain
+* Expected application origin / URI
+* Chain ID
+* Nonce
+* Issued-at timestamp
+* Expiration time
+* Not-before timestamp
+* Message structure
+
+These values are checked against server-side configuration rather than being trusted from the client.
+
+---
+
+### 2.3 Signature Verification
+
+The server supports both major Ethereum account types.
+
+#### Externally Owned Accounts
+
+For EOAs, the server:
+
+1. Hashes the SIWE message using Ethereum's message-signing format.
+2. Recovers the Ethereum address from the signature.
+3. Compares the recovered address with the address contained in the SIWE message.
+
+The recovered address is treated as the authenticated identity.
+
+#### Smart Contract Accounts
+
+For contract-based wallets such as Safe, the server supports **ERC-1271**.
+
+The signature is verified by calling:
+
+```text
+isValidSignature(bytes32 hash, bytes signature)
+```
+
+The verification succeeds only when the contract returns the ERC-1271 magic value:
+
+```text
+0x1626ba7e
+```
+
+This allows authentication to work with both traditional EOAs and smart contract wallets.
+
+---
+
+## 3. Session Management
+
+After successful signature verification, the server creates an encrypted session using `iron-session`.
+
+The session contains the **server-verified Ethereum address**, rather than accepting an address supplied independently by the client.
+
+### Cookie Configuration
+
+The session cookie is configured with:
+
+```text
+httpOnly: true
+sameSite: "lax"
+secure: true in production
+maxAge: 24 hours
+```
+
+This prevents client-side JavaScript from directly accessing the session cookie and provides browser-level protection against common cross-site request scenarios.
+
+The resulting authentication model is:
+
+```text
+Wallet Signature
+       ↓
+Server Verification
+       ↓
+Verified Ethereum Address
+       ↓
+Encrypted Session
+       ↓
+Protected API Routes
+```
+
+---
+
+## 4. Authorization
+
+Authentication and authorization are separated.
+
+Authentication establishes **who the user is**.
+
+Authorization determines **what that authenticated user can access**.
+
+Protected seller endpoints use a shared `requireAuth()` guard to ensure an active authenticated session exists.
+
+For example:
+
+```text
+GET /api/seller/listings
+GET /api/seller/payout
+```
+
+Both routes derive the user's identity exclusively from:
+
+```text
+session.address
+```
+
+They do **not** use:
+
+```text
+?address=...
+X-Seller-Address: ...
+request body address
+client wallet state
+```
+
+This prevents an authenticated user from changing the target address in a request and accessing another seller's resources.
+
+### Authorization Flow
+
+```text
+Request
+   │
+   ▼
+Session Cookie
+   │
+   ▼
+Authenticated?
+   │
+   ├── No → 401 Unauthorized
+   │
+   ▼
+session.address
+   │
+   ▼
+Seller Lookup
+   │
+   ├── Not a seller → 404
+   │
+   ▼
+Authorized Seller Data
+```
+
+---
+
+## 5. Key Components
+
+### Nonce Management
+
+[`src/lib/nonce.ts`](src/lib/nonce.ts)
+
+Responsible for:
+
+* Server-side nonce generation
+* TTL enforcement
+* Nonce validation
+* Atomic successful consumption
+* Replay prevention
+
+The default nonce lifetime is **300 seconds (5 minutes)**.
+
+---
+
+### SIWE & Signature Verification
+
+[`src/lib/verify.ts`](src/lib/verify.ts)
+
+Responsible for:
+
+* EIP-4361 message validation
+* Domain validation
+* URI/origin validation
+* Chain ID validation
+* Timestamp validation
+* EOA signature recovery
+* ERC-1271 contract-wallet verification
+
+---
+
+### Session Management
+
+[`src/lib/session.ts`](src/lib/session.ts)
+
+Responsible for:
+
+* Creating authenticated sessions
+* Encrypting session state
+* Configuring cookie security attributes
+* Destroying sessions during logout
+
+---
+
+### Authentication Guard
+
+[`src/lib/auth-guard.ts`](src/lib/auth-guard.ts)
+
+Provides a shared authentication boundary for protected API routes.
+
+Routes use the guard before accessing seller-specific resources.
+
+---
+
+### Seller Routes
+
+[`src/app/api/seller/*`](src/app/api/seller/)
+
+Seller endpoints authorize requests using the address contained in the verified session.
+
+Client-controlled identity values cannot override the session identity.
+
+---
+
+## 6. Environment Configuration
+
+Create `.env.local` using `.env.example` as a reference:
 
 ```bash
-# Server Domain & Origin Configuration
+# Server Domain & Origin
 SIWE_DOMAIN="localhost:3000"
 SIWE_ORIGIN="http://localhost:3000"
 SIWE_CHAIN_ID="1"
 SIWE_STATEMENT="Sign in with Ethereum to the application."
+
+# Nonce Lifetime
 NONCE_TTL_SECONDS="300"
 
-# Iron-Session Password (minimum 32 characters in production)
+# Session Encryption
 SESSION_PASSWORD="replace_with_a_secure_session_password_at_least_32_chars_long"
 
-# Blockchain RPC Configuration (Optional for live ERC-1271 resolution)
+# Blockchain RPC
+# Required when verifying ERC-1271 smart contract accounts.
 # RPC_URL_MAINNET="https://eth-mainnet.g.alchemy.com/v2/YOUR_API_KEY"
 # RPC_URL_SEPOLIA="https://eth-sepolia.g.alchemy.com/v2/YOUR_API_KEY"
 ```
 
+For deployment, `SESSION_PASSWORD` must be a strong, randomly generated secret and must never be committed to source control.
+
 ---
 
-## 4. Getting Started
+## 7. Getting Started
 
-### Installation
+### Install Dependencies
+
 ```bash
 npm install
 ```
 
-### Running Tests
-Execute the automated test suite covering all 9 challenge criteria:
+### Run Tests
+
 ```bash
 npm test
 ```
 
-### Typecheck & Build
+The test suite covers the authentication and authorization security requirements implemented by the application.
+
+### Typecheck
+
 ```bash
 npm run typecheck
+```
+
+### Build
+
+```bash
 npm run build
 ```
 
-### Running the Local Demo
+### Start Development Server
+
 ```bash
 npm run dev
 ```
-Open [http://localhost:3000](http://localhost:3000) in your browser.
+
+The application will be available at:
+
+```text
+http://localhost:3000
+```
 
 ---
 
-## 5. Demo Flow
+## 8. Authentication Demo
 
-1. **Connect Wallet**: Click "Connect Wallet" to connect an injected browser wallet (e.g. MetaMask, Rabby, Coinbase Wallet).
-2. **Sign In With Ethereum**: Click "Sign-In with Ethereum (SIWE)". The client fetches a fresh server nonce, constructs the SIWE message, and prompts wallet signature.
-3. **Session Verification**: The signature is verified on the server, issuing an encrypted session cookie.
-4. **Seller Dashboard**: The dashboard loads listings and payout info authorized strictly for your session's address. (Pre-configured seller addresses: Alice `0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266`, Bob `0x70997970C51812dc3A010C7d01b50e0d17dc79C8`).
-5. **Log Out**: Click "Log Out" to destroy the session cookie and clear state.
+### Connect Wallet
+
+Connect an injected Ethereum wallet such as MetaMask, Rabby, or Coinbase Wallet.
+
+### Sign In
+
+Select **Sign-In with Ethereum (SIWE)**.
+
+The client requests a fresh nonce from the server, constructs the SIWE message, and requests a wallet signature.
+
+### Server Verification
+
+The server validates the message and verifies the signature.
+
+A successful verification creates an encrypted session containing the verified Ethereum address.
+
+### Seller Authorization
+
+The seller dashboard retrieves listings and payout information using the authenticated session address.
+
+The application includes predefined seller accounts for demonstrating authorization behavior.
+
+### Logout
+
+Logging out destroys the server session and clears the authentication cookie.
 
 ---
 
-## 6. Prototype Limitations & Production Considerations
+## 9. Security Considerations
 
-- **In-Memory Nonce Storage**: The current nonce store uses a single-process in-memory `Map`. For multi-instance / autoscaling production deployments, use a distributed store with atomic TTL operations (such as Redis `SET key val EX 300 NX` and atomic `DEL`).
-- **Mock Seller Database**: Seller records are statically modeled in-memory for demonstration. In production, link verified Ethereum addresses to a persistent database (PostgreSQL, etc.).
-- **CSRF Consideration**: While `SameSite=Lax` cookies protect against cross-site POST requests in modern browsers, production applications with cross-origin APIs or custom subdomains should implement anti-CSRF tokens or explicit origin checks.
-- **RPC Rate Limits**: ERC-1271 verification requires an RPC endpoint for the specified chain. In production, ensure high-availability RPC providers with fallbacks.
+### Distributed Nonce Storage
+
+The current nonce implementation uses an in-memory store. A multi-instance deployment should use a shared datastore with atomic TTL and consumption semantics, such as Redis.
+
+A distributed store ensures that authentication state remains consistent when requests are handled by different application instances.
+
+### Session Secret Management
+
+The session encryption secret must be:
+
+* Strong and randomly generated
+* Stored outside source control
+* Provided through a secure deployment secret mechanism
+* Consistent across application instances
+
+### CSRF Protection
+
+`SameSite=Lax` provides useful browser-level protection for the session cookie. Applications using cross-origin APIs, custom subdomains, or more complex cookie flows should additionally enforce trusted origins and, where appropriate, use explicit CSRF protection.
+
+### ERC-1271 RPC Availability
+
+Smart contract wallet authentication depends on access to an Ethereum RPC endpoint. Production deployments should use reliable RPC infrastructure and account for provider failures and rate limits.
+
+---
+
+## 10. Security Properties
+
+The implementation is designed to provide the following guarantees:
+
+| Property                       | Mechanism                                                |
+| ------------------------------ | -------------------------------------------------------- |
+| Address authenticity           | Cryptographic signature verification                     |
+| Replay resistance              | Server-generated, expiring, single-use nonces            |
+| Domain binding                 | Server-side SIWE domain validation                       |
+| Chain binding                  | Server-side chain ID validation                          |
+| Origin validation              | Server-side URI/origin verification                      |
+| Time-bound authentication      | `issuedAt`, `expirationTime`, and `notBefore` validation |
+| EOA support                    | Ethereum signature recovery                              |
+| Smart wallet support           | ERC-1271 verification                                    |
+| Session confidentiality        | Encrypted session cookie                                 |
+| Client-side session protection | HTTP-only cookie                                         |
+| Seller authorization           | Server-side session address                              |
+| Identity injection prevention  | Client address parameters ignored                        |
+| Session lifetime               | Explicit cookie expiration                               |
+| Logout                         | Server-side session destruction                          |
+
+---
+
+## 11. Design Principle
+
+The central security boundary is:
+
+```text
+Client-supplied identity
+        ↓
+     NEVER TRUST
+        ✕
+        
+Wallet signature
+        ↓
+Server-side verification
+        ↓
+Verified Ethereum address
+        ↓
+Encrypted session
+        ↓
+Authorization
+```
+
+The wallet connection establishes the **ability to request authentication**.
+
+The server-side verification establishes the **authenticated identity**.
+
+Every protected operation then derives authorization from that verified identity rather than from information supplied by the client.
